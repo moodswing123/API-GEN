@@ -1,6 +1,6 @@
 BOT_TOKEN=your_telegram_bot_token_here
 OWNER_IDS=123456789,987654321,555555555  # Comma-separated – multi-owner support
-PREMIUM_LINK=https://t.me/victory_is_him
+PREMIUM_LINK=https://t.me/victory_is_h1m
 PORT=3000
 
 # 8 force-join links – exactly 8 (comma-separated)
