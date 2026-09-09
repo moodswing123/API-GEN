@@ -1,7 +1,26 @@
+# === TELEGRAM CONFIG ===
 BOT_TOKEN=your_telegram_bot_token_here
-OWNER_IDS=123456789,987654321,555555555  # Comma-separated – multi-owner support
-PREMIUM_LINK=https://t.me/victory_is_h1m
+OWNER_IDS=123456789,987654321
+
+# === YOUR PAID API CREDENTIALS ===
+# Get these from each provider's dashboard
+OPENAI_MASTER_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ANTHROPIC_MASTER_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+GOOGLE_MASTER_KEY=AIza-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+COHERE_MASTER_KEY=coh-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+REPLICATE_MASTER_TOKEN=r8_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+MISTRAL_MASTER_KEY=mistral-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DEEPSEEK_MASTER_KEY=ds-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+GROQ_MASTER_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# === FREE PROVIDERS (get free keys) ===
+OPENROUTER_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+HUGGINGFACE_KEY=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TOGETHER_MASTER_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# === BOT CONFIG ===
+PREMIUM_LINK=https://t.me/victory_is_him
 PORT=3000
 
-# 8 force-join links – exactly 8 (comma-separated)
-FORCE_JOIN_LINKS=https://t.me/victory_channel1,https://t.me/victory_group2,https://t.me/tech_community3,https://t.me/ai_hub4,https://t.me/crypto_king5,https://t.me/dev_army6,https://t.me/cyber_lords7,https://t.me/final_boss8
+# === FORCE-JOIN LINKS (exactly 8) ===
+FORCE_JOIN_LINKS=https://t.me/channel1,https://t.me/channel2,https://t.me/channel3,https://t.me/channel4,https://t.me/channel5,https://t.me/channel6,https://t.me/channel7,https://t.me/channel8
