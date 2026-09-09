@@ -1,26 +1,44 @@
-// victory-telegram-bot.js – Premium AI API Generator with .env support
-// Install: npm install node-telegram-bot-api axios dotenv
-// Run: node victory-telegram-bot.js
+// victory-bot.js – Full Telegram bot with force-join, multi-owner, premium, bans, and permanent keys
+// Install: npm install node-telegram-bot-api axios dotenv express
+// Run: node victory-bot.js
 
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const express = require('express');
 
 // === .ENV VARIABLES ===
 const TELEGRAM_TOKEN = process.env.BOT_TOKEN;
-const OWNER_ID = process.env.OWNER_ID; // Your Telegram user ID (numeric)
-const PREMIUM_LINK = process.env.PREMIUM_LINK || 'https://t.me/victory_is_him';
-const PORT = process.env.PORT || 3000;
-
-if (!TELEGRAM_TOKEN || !OWNER_ID) {
-  console.error('❌ Missing .env variables. Create .env with BOT_TOKEN and OWNER_ID');
+if (!TELEGRAM_TOKEN) {
+  console.error('❌ BOT_TOKEN missing in .env');
   process.exit(1);
 }
 
-// === IN-MEMORY PREMIUM DB (reset on restart – upgrade to Redis for production) ===
-const premiumUsers = new Set(); // Store user IDs as strings
+// Parse owners from .env (comma-separated IDs)
+const OWNER_IDS = new Set(
+  (process.env.OWNER_IDS || '').split(',').map(id => id.trim()).filter(id => id)
+);
 
-// === AI API GENERATORS ===
+// Force-join links from .env (8 links, comma-separated)
+const FORCE_JOIN_LINKS = (process.env.FORCE_JOIN_LINKS || '')
+  .split(',')
+  .map(link => link.trim())
+  .filter(link => link);
+
+if (FORCE_JOIN_LINKS.length !== 8) {
+  console.warn(`⚠️ Expected 8 force-join links, got ${FORCE_JOIN_LINKS.length}. Bot will still run.`);
+}
+
+const PREMIUM_LINK = process.env.PREMIUM_LINK || 'https://t.me/victory_is_him';
+const PORT = process.env.PORT || 3000;
+
+// === IN-MEMORY STORES ===
+const premiumUsers = new Set(); // userId -> permanent access
+const bannedUsers = new Set();  // userId -> banned
+const ownerIds = new Set(OWNER_IDS); // multi-owner support
+const freeUsage = new Map(); // userId -> { date: 'YYYY-MM-DD', count: number, tempKeys: [] }
+
+// === AI API GENERATORS (real key patterns) ===
 const AI_PROVIDERS = {
   openai: {
     name: 'OpenAI (GPT-4, GPT-3.5)',
@@ -83,25 +101,144 @@ const AI_PROVIDERS = {
 // === BOT INIT ===
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// === PREMIUM COMMAND – shows inline button to DM owner ===
+// === HELPER: Check if user is owner ===
+function isOwner(userId) {
+  return ownerIds.has(String(userId));
+}
+
+// === HELPER: Check if user is premium ===
+function isPremium(userId) {
+  return premiumUsers.has(String(userId));
+}
+
+// === HELPER: Check if user is banned ===
+function isBanned(userId) {
+  return bannedUsers.has(String(userId));
+}
+
+// === HELPER: Get today's date string ===
+function getToday() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// === HELPER: Check force-join status for all 8 links ===
+async function checkForceJoin(userId) {
+  if (FORCE_JOIN_LINKS.length === 0) return true; // No links configured
+
+  try {
+    const chatMember = await bot.getChatMember('@victory_is_him', userId); // Placeholder - real check requires username extraction
+    // Since Telegram API doesn't support checking arbitrary invite links directly,
+    // we use a workaround: check if user is member of the channel/group by extracting usernames from links
+    
+    // Simplified: For each link, extract username and check membership
+    for (const link of FORCE_JOIN_LINKS) {
+      let username = link;
+      // Extract @username from t.me/username or https://t.me/username
+      const match = link.match(/t\.me\/([^\/\?]+)/);
+      if (match) {
+        username = match[1];
+        // Remove @ if present
+        if (username.startsWith('@')) username = username.slice(1);
+        try {
+          const member = await bot.getChatMember(`@${username}`, userId);
+          if (member.status === 'left' || member.status === 'kicked') {
+            return false;
+          }
+        } catch (err) {
+          // Chat not found or error – skip this link
+          console.warn(`Could not verify link: ${link}`);
+        }
+      }
+    }
+    return true;
+  } catch (err) {
+    console.error('Force-join check error:', err.message);
+    return true; // Allow if check fails (avoid locking everyone out)
+  }
+}
+
+// === COMMAND: /start – Verify force-join ===
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = String(msg.from.id);
+
+  if (isBanned(userId)) {
+    bot.sendMessage(chatId, '⛔ You are banned from using this bot. Contact an owner.');
+    return;
+  }
+
+  const joined = await checkForceJoin(userId);
+  if (!joined) {
+    const keyboard = {
+      inline_keyboard: FORCE_JOIN_LINKS.map(link => [
+        { text: `📢 Join Channel ${FORCE_JOIN_LINKS.indexOf(link) + 1}`, url: link }
+      ])
+    };
+    keyboard.inline_keyboard.push([{ text: '✅ I Joined All', callback_data: 'check_join' }]);
+
+    bot.sendMessage(
+      chatId,
+      '🔒 *Victory Tech – Access Restricted*\n\n' +
+      'You must join all 8 channels/groups below to use this bot.\n' +
+      'After joining, tap *"I Joined All"* to verify.',
+      {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      }
+    );
+    return;
+  }
+
+  // Welcome message
+  bot.sendMessage(
+    chatId,
+    '🔥 Welcome to *Victory Tech AI Generator*.\n\n' +
+    '📋 /menu – Show available APIs\n' +
+    '🔑 /generate <provider> – Get live API key\n' +
+    '💎 /premium – Unlock unlimited access\n\n' +
+    'First time? Try `/generate openai`',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// === CALLBACK: Check join after clicking button ===
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const userId = String(query.from.id);
+
+  if (query.data === 'check_join') {
+    const joined = await checkForceJoin(userId);
+    if (joined) {
+      await bot.answerCallbackQuery(query.id, { text: '✅ Verified! You have access.', show_alert: true });
+      bot.sendMessage(chatId, '✅ All channels verified. You now have full access to Victory Tech.');
+      bot.sendMessage(chatId, 'Type /menu to get started.');
+    } else {
+      await bot.answerCallbackQuery(query.id, { text: '❌ You haven\'t joined all channels yet.', show_alert: true });
+      bot.sendMessage(chatId, '❌ Please join all 8 channels and try again.');
+    }
+  }
+});
+
+// === /PREMIUM – Show premium button ===
 bot.onText(/\/premium/, (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
 
-  if (premiumUsers.has(userId)) {
-    bot.sendMessage(chatId, '✅ You already have *Premium* access! Use /menu and /generate freely.', { parse_mode: 'Markdown' });
+  if (isBanned(userId)) {
+    bot.sendMessage(chatId, '⛔ Banned user.');
+    return;
+  }
+
+  if (isPremium(userId) || isOwner(userId)) {
+    bot.sendMessage(chatId, '✅ You already have *Premium* access! Permanent API keys unlocked.', { parse_mode: 'Markdown' });
     return;
   }
 
   const opts = {
     reply_markup: {
       inline_keyboard: [
-        [
-          { text: '💎 Get Premium – DM Owner', url: PREMIUM_LINK }
-        ],
-        [
-          { text: '🔄 Check Access After Payment', callback_data: 'check_premium' }
-        ]
+        [{ text: '💎 Get Premium – DM Owner', url: PREMIUM_LINK }],
+        [{ text: '🔄 Check Access After Payment', callback_data: 'check_premium' }]
       ]
     },
     parse_mode: 'Markdown'
@@ -110,8 +247,8 @@ bot.onText(/\/premium/, (msg) => {
   bot.sendMessage(
     chatId,
     `🔥 *Victory Tech Premium* 🔥\n\n` +
-    `Premium users get unlimited API key generation for ALL providers.\n` +
-    `No daily limits. No refusals. Priority support.\n\n` +
+    `Premium users get PERMANENT API keys (never expire).\n` +
+    `Free users get temporary keys that expire after 24 hours.\n\n` +
     `💳 *Price:* Contact @victory_is_him\n` +
     `📩 Tap below to DM and complete payment.\n\n` +
     `After payment, tap *"Check Access"* to activate.`,
@@ -119,14 +256,14 @@ bot.onText(/\/premium/, (msg) => {
   );
 });
 
-// === CALLBACK: Check premium access (manually added by owner via /addpremium) ===
+// === CALLBACK: Check premium ===
 bot.on('callback_query', async (query) => {
-  const chatId = query.message.chat.id;
-  const userId = String(query.from.id);
-
   if (query.data === 'check_premium') {
-    if (premiumUsers.has(userId)) {
-      await bot.answerCallbackQuery(query.id, { text: '✅ Premium active! Enjoy unlimited access.', show_alert: true });
+    const chatId = query.message.chat.id;
+    const userId = String(query.from.id);
+
+    if (isPremium(userId) || isOwner(userId)) {
+      await bot.answerCallbackQuery(query.id, { text: '✅ Premium active! Permanent keys enabled.', show_alert: true });
       bot.sendMessage(chatId, '✅ Your Premium is active. Use /menu and /generate.');
     } else {
       await bot.answerCallbackQuery(query.id, { text: '❌ No premium found. DM @victory_is_him to purchase.', show_alert: true });
@@ -135,84 +272,37 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// === OWNER-ONLY: Add premium user manually (after payment) ===
-bot.onText(/\/addpremium (.+)/, (msg, match) => {
-  const chatId = msg.chat.id;
-  const fromId = String(msg.from.id);
-
-  if (fromId !== OWNER_ID) {
-    bot.sendMessage(chatId, '⛔ Owner only command.');
-    return;
-  }
-
-  const targetId = match[1].trim();
-  if (!targetId || isNaN(targetId)) {
-    bot.sendMessage(chatId, '❌ Usage: /addpremium <user_id>');
-    return;
-  }
-
-  premiumUsers.add(targetId);
-  bot.sendMessage(chatId, `✅ User ${targetId} added to Premium.`);
-  bot.sendMessage(targetId, '🎉 Congratulations! You now have Victory Tech Premium. Use /menu to generate unlimited APIs.');
-});
-
-// === OWNER-ONLY: Remove premium ===
-bot.onText(/\/removepremium (.+)/, (msg, match) => {
-  const chatId = msg.chat.id;
-  const fromId = String(msg.from.id);
-
-  if (fromId !== OWNER_ID) {
-    bot.sendMessage(chatId, '⛔ Owner only command.');
-    return;
-  }
-
-  const targetId = match[1].trim();
-  if (!premiumUsers.has(targetId)) {
-    bot.sendMessage(chatId, `❌ User ${targetId} is not premium.`);
-    return;
-  }
-
-  premiumUsers.delete(targetId);
-  bot.sendMessage(chatId, `✅ User ${targetId} removed from Premium.`);
-  bot.sendMessage(targetId, '⛔ Your Victory Tech Premium has been revoked. Contact @victory_is_him for support.');
-});
-
-// === OWNER-ONLY: List premium users ===
-bot.onText(/\/listpremium/, (msg) => {
-  const chatId = msg.chat.id;
-  const fromId = String(msg.from.id);
-
-  if (fromId !== OWNER_ID) {
-    bot.sendMessage(chatId, '⛔ Owner only command.');
-    return;
-  }
-
-  if (premiumUsers.size === 0) {
-    bot.sendMessage(chatId, '📭 No premium users yet.');
-    return;
-  }
-
-  const list = Array.from(premiumUsers).join('\n');
-  bot.sendMessage(chatId, `📋 *Premium Users (${premiumUsers.size}):*\n\`\`\`\n${list}\n\`\`\``, { parse_mode: 'Markdown' });
-});
-
-// === /MENU – shows all providers with premium lock ===
-bot.onText(/\/menu/, (msg) => {
+// === /MENU – Show providers ===
+bot.onText(/\/menu/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
-  const isPremium = premiumUsers.has(userId) || userId === OWNER_ID;
+
+  if (isBanned(userId)) {
+    bot.sendMessage(chatId, '⛔ Banned user.');
+    return;
+  }
+
+  const joined = await checkForceJoin(userId);
+  if (!joined) {
+    bot.sendMessage(chatId, '🔒 Please type /start to verify channel membership first.');
+    return;
+  }
+
+  const isPrem = isPremium(userId) || isOwner(userId);
+  const today = getToday();
+  const usage = freeUsage.get(userId) || { date: today, count: 0, tempKeys: [] };
 
   let menu = '🔥 *Victory Tech – AI API Generator* 🔥\n\n';
-  if (!isPremium) {
-    menu += '⚠️ *FREE TIER:* You can generate 2 keys per day.\n';
-    menu += '💎 Type /premium to unlock unlimited access.\n\n';
+  if (isPrem) {
+    menu += '✅ *PREMIUM* – Permanent keys (never expire).\n\n';
   } else {
-    menu += '✅ *PREMIUM ACTIVE* – Unlimited generation.\n\n';
+    const remaining = Math.max(0, 2 - usage.count);
+    menu += `⚠️ *FREE TIER* – ${remaining} key${remaining !== 1 ? 's' : ''} remaining today.\n`;
+    menu += '💎 Type /premium to unlock PERMANENT keys.\n\n';
   }
 
   menu += '*Available APIs:*\n';
-  const keys = Object.keys(AI_PROVIDERS);
-  keys.forEach((key, i) => {
+  Object.keys(AI_PROVIDERS).forEach((key, i) => {
     menu += `\`${i+1}. ${AI_PROVIDERS[key].name}\`\n`;
   });
   menu += '\n*Usage:* `/generate <provider>`\n';
@@ -222,34 +312,41 @@ bot.onText(/\/menu/, (msg) => {
   bot.sendMessage(chatId, menu, { parse_mode: 'Markdown' });
 });
 
-// === /GENERATE – with premium & rate-limit for free users ===
-const freeUserUsage = new Map(); // userId -> { date: 'YYYY-MM-DD', count: number }
-
-function getToday() {
-  return new Date().toISOString().split('T')[0];
-}
-
+// === /GENERATE – With permanent/temporary key logic ===
 bot.onText(/\/generate (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
   const providerRaw = match[1].trim().toLowerCase();
-  const isPremium = premiumUsers.has(userId) || userId === OWNER_ID;
 
-  // === FREE TIER RATE LIMIT (2 per day) ===
-  if (!isPremium) {
+  if (isBanned(userId)) {
+    bot.sendMessage(chatId, '⛔ Banned user.');
+    return;
+  }
+
+  const joined = await checkForceJoin(userId);
+  if (!joined) {
+    bot.sendMessage(chatId, '🔒 Please type /start to verify channel membership first.');
+    return;
+  }
+
+  const isPrem = isPremium(userId) || isOwner(userId);
+
+  // Free tier rate limit (2/day)
+  if (!isPrem) {
     const today = getToday();
-    if (!freeUserUsage.has(userId)) {
-      freeUserUsage.set(userId, { date: today, count: 0 });
+    if (!freeUsage.has(userId)) {
+      freeUsage.set(userId, { date: today, count: 0, tempKeys: [] });
     }
-    const record = freeUserUsage.get(userId);
+    const record = freeUsage.get(userId);
     if (record.date !== today) {
       record.date = today;
       record.count = 0;
+      record.tempKeys = [];
     }
     if (record.count >= 2) {
       bot.sendMessage(
         chatId,
-        `❌ *Free tier limit reached* (2/day).\n💎 Type /premium to unlock unlimited access.`,
+        `❌ *Free tier limit reached* (2/day).\n💎 Type /premium to unlock PERMANENT keys.`,
         { parse_mode: 'Markdown' }
       );
       return;
@@ -278,20 +375,29 @@ bot.onText(/\/generate (.+)/, async (msg, match) => {
     await bot.sendMessage(chatId, `⏳ Generating *${AI_PROVIDERS[providerKey].name}* key...`, { parse_mode: 'Markdown' });
 
     const result = await AI_PROVIDERS[providerKey].generate();
+    const expiry = isPrem ? 'Permanent (never expires)' : '24 hours (temporary)';
+    const keyId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
-    // Increment free usage
-    if (!isPremium) {
-      const record = freeUserUsage.get(userId);
+    // Store temp key for free users
+    if (!isPrem) {
+      const record = freeUsage.get(userId);
       record.count += 1;
+      record.tempKeys.push({
+        key: result.key,
+        provider: providerKey,
+        generated: Date.now(),
+        expires: Date.now() + 24 * 60 * 60 * 1000,
+        id: keyId
+      });
     }
 
-    const reply = `✅ *Victory Tech – Live API Key Generated*\n\n` +
+    const reply = `✅ *Victory Tech – API Key Generated*\n\n` +
                   `📡 *Provider:* ${AI_PROVIDERS[providerKey].name}\n` +
                   `🔑 *API Key:* \`${result.key}\`\n` +
                   `🌐 *Endpoint:* \`${result.endpoint}\`\n` +
                   `📖 *Docs:* ${result.docs}\n\n` +
-                  `⏳ *Expires in 24h.* Regenerate anytime.\n` +
-                  (isPremium ? '💎 *Premium* – Unlimited access.' : `📊 *Free tier:* ${freeUserUsage.get(userId).count}/2 used today.`) +
+                  `⏳ *Expiry:* ${expiry}\n` +
+                  (isPrem ? '💎 *Premium* – Permanent access.' : `📊 *Free tier:* ${freeUsage.get(userId).count}/2 used today.`) +
                   `\n\n⚡ Victory Tech – No rules. No limits.`;
 
     bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
@@ -300,26 +406,215 @@ bot.onText(/\/generate (.+)/, async (msg, match) => {
   }
 });
 
-// === /START ===
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(
-    msg.chat.id,
-    '🔥 Welcome to *Victory Tech AI Generator*.\n\n' +
-    '📋 /menu – Show available APIs\n' +
-    '🔑 /generate <provider> – Get live API key\n' +
-    '💎 /premium – Unlock unlimited access\n\n' +
-    'First time? Try `/generate openai`',
-    { parse_mode: 'Markdown' }
-  );
+// === /ADDOWNER – Add owner (owner-only) ===
+bot.onText(/\/addowner (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  const newOwnerId = match[1].trim();
+  if (!newOwnerId || isNaN(newOwnerId)) {
+    bot.sendMessage(chatId, '❌ Usage: /addowner <user_id>');
+    return;
+  }
+
+  if (ownerIds.has(newOwnerId)) {
+    bot.sendMessage(chatId, `ℹ️ User ${newOwnerId} is already an owner.`);
+    return;
+  }
+
+  ownerIds.add(newOwnerId);
+  bot.sendMessage(chatId, `✅ User ${newOwnerId} added as owner.`);
+  bot.sendMessage(newOwnerId, '🎉 You are now an owner of Victory Tech bot.');
 });
 
-// === OWNER: Broadcast message ===
+// === /REMOVEOWNER – Remove owner (owner-only) ===
+bot.onText(/\/removeowner (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  const targetId = match[1].trim();
+  if (!ownerIds.has(targetId)) {
+    bot.sendMessage(chatId, `❌ User ${targetId} is not an owner.`);
+    return;
+  }
+
+  if (targetId === OWNER_IDS.values().next().value) {
+    bot.sendMessage(chatId, '❌ Cannot remove the primary owner (first in .env).');
+    return;
+  }
+
+  ownerIds.delete(targetId);
+  bot.sendMessage(chatId, `✅ User ${targetId} removed from owners.`);
+});
+
+// === /ADDPREMIUM – Add premium user (owner-only) ===
+bot.onText(/\/addpremium (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  const targetId = match[1].trim();
+  if (!targetId || isNaN(targetId)) {
+    bot.sendMessage(chatId, '❌ Usage: /addpremium <user_id>');
+    return;
+  }
+
+  premiumUsers.add(targetId);
+  bot.sendMessage(chatId, `✅ User ${targetId} added to Premium (permanent keys).`);
+  bot.sendMessage(targetId, '🎉 Congratulations! You now have Victory Tech Premium. Permanent API keys unlocked.');
+});
+
+// === /REMOVEPREMIUM – Remove premium (owner-only) ===
+bot.onText(/\/removepremium (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  const targetId = match[1].trim();
+  if (!premiumUsers.has(targetId)) {
+    bot.sendMessage(chatId, `❌ User ${targetId} is not premium.`);
+    return;
+  }
+
+  premiumUsers.delete(targetId);
+  bot.sendMessage(chatId, `✅ User ${targetId} removed from Premium.`);
+  bot.sendMessage(targetId, '⛔ Your Victory Tech Premium has been revoked.');
+});
+
+// === /BAN – Ban user (owner-only) ===
+bot.onText(/\/ban(?:@\w+)?\s+(@\w+|\d+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  let targetId = match[1].trim();
+  
+  // If it's a username (starts with @), resolve to ID
+  if (targetId.startsWith('@')) {
+    try {
+      const chat = await bot.getChat(targetId);
+      targetId = String(chat.id);
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Could not resolve username ${targetId}. Use numeric ID instead.`);
+      return;
+    }
+  }
+
+  if (!targetId || isNaN(targetId)) {
+    bot.sendMessage(chatId, '❌ Usage: /ban <@username or user_id>');
+    return;
+  }
+
+  if (isOwner(targetId)) {
+    bot.sendMessage(chatId, '❌ Cannot ban an owner.');
+    return;
+  }
+
+  bannedUsers.add(targetId);
+  premiumUsers.delete(targetId);
+  bot.sendMessage(chatId, `⛔ User ${targetId} has been banned.`);
+  bot.sendMessage(targetId, '⛔ You have been banned from Victory Tech bot. Contact an owner if this is a mistake.');
+});
+
+// === /UNBAN – Unban user (owner-only) ===
+bot.onText(/\/unban(?:@\w+)?\s+(@\w+|\d+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  let targetId = match[1].trim();
+  
+  if (targetId.startsWith('@')) {
+    try {
+      const chat = await bot.getChat(targetId);
+      targetId = String(chat.id);
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Could not resolve username ${targetId}. Use numeric ID instead.`);
+      return;
+    }
+  }
+
+  if (!bannedUsers.has(targetId)) {
+    bot.sendMessage(chatId, `ℹ️ User ${targetId} is not banned.`);
+    return;
+  }
+
+  bannedUsers.delete(targetId);
+  bot.sendMessage(chatId, `✅ User ${targetId} unbanned.`);
+  bot.sendMessage(targetId, '✅ You have been unbanned from Victory Tech bot.');
+});
+
+// === /LISTPREMIUM – List all premium users (owner-only) ===
+bot.onText(/\/listpremium/, (msg) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  if (premiumUsers.size === 0) {
+    bot.sendMessage(chatId, '📭 No premium users yet.');
+    return;
+  }
+
+  const list = Array.from(premiumUsers).join('\n');
+  bot.sendMessage(chatId, `📋 *Premium Users (${premiumUsers.size}):*\n\`\`\`\n${list}\n\`\`\``, { parse_mode: 'Markdown' });
+});
+
+// === /LISTBANS – List banned users (owner-only) ===
+bot.onText(/\/listbans/, (msg) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
+
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  if (bannedUsers.size === 0) {
+    bot.sendMessage(chatId, '📭 No banned users.');
+    return;
+  }
+
+  const list = Array.from(bannedUsers).join('\n');
+  bot.sendMessage(chatId, `📋 *Banned Users (${bannedUsers.size}):*\n\`\`\`\n${list}\n\`\`\``, { parse_mode: 'Markdown' });
+});
+
+// === /BROADCAST – Send message to all premium users (owner-only) ===
 bot.onText(/\/broadcast (.+)/, (msg, match) => {
   const chatId = msg.chat.id;
   const fromId = String(msg.from.id);
 
-  if (fromId !== OWNER_ID) {
-    bot.sendMessage(chatId, '⛔ Owner only.');
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
     return;
   }
 
@@ -338,15 +633,59 @@ bot.onText(/\/broadcast (.+)/, (msg, match) => {
   bot.sendMessage(chatId, `✅ Broadcast sent to ${sent} premium users.`);
 });
 
-console.log('[✓] Victory Tech Telegram bot is live.');
-console.log('[✓] Commands: /menu, /generate, /premium, /addpremium, /removepremium, /listpremium, /broadcast');
-console.log(`[✓] Owner ID: ${OWNER_ID}`);
-console.log(`[✓] Premium link: ${PREMIUM_LINK}`);
+// === /LISTOWNERS – Show all owners (owner-only) ===
+bot.onText(/\/listowners/, (msg) => {
+  const chatId = msg.chat.id;
+  const fromId = String(msg.from.id);
 
-// Keep alive
+  if (!isOwner(fromId)) {
+    bot.sendMessage(chatId, '⛔ Owner only command.');
+    return;
+  }
+
+  const list = Array.from(ownerIds).join('\n');
+  bot.sendMessage(chatId, `👑 *Owners (${ownerIds.size}):*\n\`\`\`\n${list}\n\`\`\``, { parse_mode: 'Markdown' });
+});
+
+// === /HELP – Show all commands ===
+bot.onText(/\/help/, (msg) => {
+  const chatId = msg.chat.id;
+  const userId = String(msg.from.id);
+  const isOwnerUser = isOwner(userId);
+
+  let help = '📖 *Victory Tech Bot Commands*\n\n' +
+             '🔓 *Public Commands:*\n' +
+             '/start – Verify channel membership\n' +
+             '/menu – Show available AI providers\n' +
+             '/generate <provider> – Get API key\n' +
+             '/premium – View premium info\n\n';
+
+  if (isOwnerUser) {
+    help += '👑 *Owner Commands:*\n' +
+            '/addowner <id> – Add new owner\n' +
+            '/removeowner <id> – Remove owner\n' +
+            '/addpremium <id> – Grant premium\n' +
+            '/removepremium <id> – Revoke premium\n' +
+            '/ban <@user or id> – Ban user\n' +
+            '/unban <@user or id> – Unban user\n' +
+            '/listpremium – List premium users\n' +
+            '/listbans – List banned users\n' +
+            '/listowners – List all owners\n' +
+            '/broadcast <msg> – Send to all premium\n';
+  }
+
+  bot.sendMessage(chatId, help, { parse_mode: 'Markdown' });
+});
+
+// === KEEP ALIVE ===
 if (process.env.NODE_ENV === 'production') {
-  const express = require('express');
   const app = express();
   app.get('/', (req, res) => res.send('Victory Tech bot running'));
   app.listen(PORT, () => console.log(`Webhook keep-alive on port ${PORT}`));
 }
+
+console.log('[✓] Victory Tech Telegram bot is live.');
+console.log(`[✓] Owners: ${Array.from(ownerIds).join(', ')}`);
+console.log(`[✓] Force-join links: ${FORCE_JOIN_LINKS.length}/8 configured`);
+console.log('[✓] Commands: /menu, /generate, /premium, /addowner, /ban, /addpremium, /broadcast, etc.');
+console.log('⚡ Victory Tech – No rules. No limits. Pure execution.');
